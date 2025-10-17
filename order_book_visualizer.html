@@ -69,7 +69,10 @@
                                 </button>
                             </div>
                         </div>
-                        <span class="text-lg font-mono text-gray-400 hidden md:inline">Use mouse wheel to zoom, click and drag to pan.</span>
+                        <div class="flex items-center gap-4 text-gray-400 text-sm font-mono">
+                            <span>Use mouse wheel to zoom, click and drag to pan.</span>
+                            <span id="fps-display" class="w-20 text-right">FPS: --</span>
+                        </div>
                         <span class="text-xl font-mono">
                             Price: <span id="price-display" class="text-yellow-300">0.0000</span>
                         </span>
@@ -540,6 +543,7 @@
                 this.dragStart = null;
                 this.mouseY = null;
                 this.latestProps = null;
+                this.needsFullRedraw = true;
                 
                 this.initEventListeners();
             }
@@ -562,6 +566,7 @@
                         if (this.history.length > chartWidth) {
                             this.history.splice(0, this.history.length - chartWidth);
                         }
+                        this.needsFullRedraw = true;
                         this.redraw();
                     }
                 });
@@ -569,7 +574,7 @@
 
                 this.overlayCanvas.addEventListener('mousemove', this.handleMouseMove.bind(this));
                 this.overlayCanvas.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
-                this.overlayCanvas.addEventListener('wheel', this.handleWheel.bind(this));
+                this.overlayCanvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
                 this.overlayCanvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
                 this.overlayCanvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
                 window.addEventListener('mouseup', () => {
@@ -595,6 +600,7 @@
                     min: priceAtCursor - (1 - cursorY / height) * newRange,
                     max: priceAtCursor + (cursorY / height) * newRange
                 };
+                this.needsFullRedraw = true;
                 this.redraw();
             }
 
@@ -626,6 +632,7 @@
                         min: startView.min + priceDelta,
                         max: startView.max + priceDelta,
                     };
+                    this.needsFullRedraw = true;
                     this.redraw();
                 } else if (this.latestProps) {
                     this.drawOverlay(this.latestProps);
@@ -655,6 +662,7 @@
                 if (updateCounter === 0) {
                     this.history = [];
                     this.priceView = null;
+                    this.needsFullRedraw = true;
                 }
                 
                 if (updateCounter === 1 && orderBook) {
@@ -677,6 +685,7 @@
                             this.priceView = { min: min - range * 0.2, max: max + range * 0.2 };
                         }
                     }
+                    this.needsFullRedraw = true;
                 }
 
                 const lastUpdateInHistory = this.history.length > 0 ? this.history[this.history.length - 1].updateCounter : -1;
@@ -697,7 +706,90 @@
                     }
                 }
                 
-                this.redraw();
+                if (this.isDragging) {
+                    this.drawOverlay(props);
+                    return;
+                }
+
+                if (this.needsFullRedraw) {
+                    this.redraw();
+                } else {
+                    this.drawLatestFrame();
+                }
+                this.drawOverlay(props);
+            }
+
+            drawLatestFrame() {
+                if (!this.latestProps || !this.priceView || this.history.length < 2) return;
+                const { dpr, width, height } = this.dimensions;
+                const RIGHT_PADDING = 80;
+                const chartWidth = width - RIGHT_PADDING;
+                if (chartWidth <= 0) return;
+
+                // Shift canvas content
+                this.ctx.globalCompositeOperation = 'copy';
+                this.ctx.drawImage(this.canvas, -dpr, 0);
+                this.ctx.globalCompositeOperation = 'source-over';
+
+                // Clear the rightmost edge for the new frame
+                this.ctx.clearRect(chartWidth - 1, 0, 1, height);
+
+                const lastFrame = this.history[this.history.length - 1];
+                const prevFrame = this.history[this.history.length - 2];
+                const { orderBook, currentPrice } = lastFrame;
+
+                const { min: displayMinPrice, max: displayMaxPrice } = this.priceView;
+                const priceRange = displayMaxPrice - displayMinPrice;
+                if (priceRange <= 0) return;
+
+                // Draw heatmap column
+                const allVolumes = [...orderBook.bids.values(), ...orderBook.asks.values()].map(parseFloat);
+                if (allVolumes.length > 0) {
+                    const maxLogVolume = Math.log1p(Math.max(...allVolumes));
+                    if (maxLogVolume > 0) {
+                        let wallThreshold = 0;
+                        if (this.latestProps.visualizationType === 'walls') {
+                             const validVolumes = allVolumes.filter(v => v > 0);
+                            if(validVolumes.length > 0) {
+                                wallThreshold = (validVolumes.reduce((s, v) => s + v, 0) / validVolumes.length) * 10;
+                            }
+                        }
+                        const pixelVolumes = new Map();
+                        const processSide = (side) => {
+                            side.forEach((quantity, priceStr) => {
+                                const price = parseFloat(priceStr);
+                                const volume = parseFloat(quantity);
+                                const y = Math.floor(((displayMaxPrice - price) / priceRange) * height);
+                                if (y >= 0 && y < height) {
+                                    pixelVolumes.set(y, (pixelVolumes.get(y) || 0) + volume);
+                                }
+                            });
+                        };
+                        processSide(orderBook.bids);
+                        processSide(orderBook.asks);
+                        
+                        pixelVolumes.forEach((volume, y) => {
+                            if (this.latestProps.visualizationType === 'book' || (this.latestProps.visualizationType === 'walls' && volume >= wallThreshold)) {
+                                this.ctx.fillStyle = this.volumeToColor(volume, maxLogVolume);
+                                this.ctx.fillRect(chartWidth - 1, y, 1, 1);
+                            }
+                        });
+                    }
+                }
+                
+                // Draw price line segment
+                this.ctx.strokeStyle = 'rgb(255, 255, 255)';
+                this.ctx.lineWidth = 1;
+                const prevY = ((displayMaxPrice - prevFrame.currentPrice) / priceRange) * height;
+                const currY = ((displayMaxPrice - currentPrice) / priceRange) * height;
+                
+                if (prevFrame.currentPrice >= displayMinPrice && prevFrame.currentPrice <= displayMaxPrice &&
+                    currentPrice >= displayMinPrice && currentPrice <= displayMaxPrice) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(chartWidth - 1.5, prevY);
+                    this.ctx.lineTo(chartWidth - 0.5, currY);
+                    this.ctx.stroke();
+                }
             }
             
             redraw() {
@@ -707,8 +799,9 @@
                     }
                     return;
                 }
-
-                const { visualizationType, eatenWallEvents, bounceEvents } = this.latestProps;
+                this.needsFullRedraw = false;
+                
+                const { visualizationType } = this.latestProps;
                 const RIGHT_PADDING = 80;
                 
                 const { width, height } = this.dimensions;
@@ -721,14 +814,10 @@
                 const priceRange = displayMaxPrice - displayMinPrice;
                 if (priceRange <= 0) return;
 
-                const updateCounterToX = new Map();
-
                 this.history.forEach((frame, i) => {
                     const x = chartWidth - this.history.length + i;
                     if (x < 0) return;
                     
-                    updateCounterToX.set(frame.updateCounter, x);
-
                     const { orderBook } = frame;
                     const allVolumes = [...orderBook.bids.values(), ...orderBook.asks.values()].map(parseFloat);
                     if (allVolumes.length === 0) return;
@@ -797,59 +886,18 @@
                 if (pathStarted) {
                     this.ctx.stroke();
                 }
-
-                if (visualizationType === 'walls') {
-                    eatenWallEvents.forEach(event => {
-                        const x = updateCounterToX.get(event.updateCounter);
-                        if (x === undefined || x < 0 || x > chartWidth) return;
-                        
-                        const y = Math.floor(((displayMaxPrice - event.price) / priceRange) * height);
-                        if (y >= 0 && y < height) {
-                            this.ctx.fillStyle = '#FFD700';
-                            this.ctx.beginPath();
-                            this.ctx.arc(x + 0.5, y, 3, 0, 2 * Math.PI);
-                            this.ctx.fill();
-                            this.ctx.font = '10px monospace';
-                            this.ctx.textAlign = 'right';
-                            this.ctx.textBaseline = 'middle';
-                            this.ctx.fillStyle = '#FFFFFF';
-                            this.ctx.fillText(`${(event.tradedPercentage * 100).toFixed(0)}%`, x - 5, y);
-                        }
-                    });
-                    
-                    bounceEvents.forEach(event => {
-                        const x = updateCounterToX.get(event.updateCounter);
-                        if (x === undefined || x < 0 || x > chartWidth) return;
-                        
-                        const y = Math.floor(((displayMaxPrice - event.price) / priceRange) * height);
-                        if (y >= 0 && y < height) {
-                            this.ctx.beginPath();
-                            if (event.side === 'bid') {
-                                this.ctx.fillStyle = '#22c55e';
-                                this.ctx.moveTo(x - 2, y + 5); this.ctx.lineTo(x + 3, y); this.ctx.lineTo(x - 7, y);
-                            } else {
-                                this.ctx.fillStyle = '#ef4444';
-                                this.ctx.moveTo(x - 2, y - 5); this.ctx.lineTo(x + 3, y); this.ctx.lineTo(x - 7, y);
-                            }
-                            this.ctx.closePath();
-                            this.ctx.fill();
-                        }
-                    });
-                }
                 
                 this.drawOverlay(this.latestProps);
             }
 
             drawOverlay(props) {
                 if (!props) return;
-                const { currentPrice } = props;
+                const { currentPrice, visualizationType, eatenWallEvents, bounceEvents } = props;
                 const { width, height } = this.dimensions;
-                if(width <= 0 || height <= 0 || !this.priceView) {
-                    this.overlayCtx.clearRect(0, 0, width, height);
-                    return;
-                }
                 
                 this.overlayCtx.clearRect(0, 0, width, height);
+                if(width <= 0 || height <= 0 || !this.priceView) return;
+                
                 const { min, max } = this.priceView;
                 const range = max - min;
                 if (range <= 0) return;
@@ -902,6 +950,56 @@
                     this.overlayCtx.textBaseline = 'middle';
                     this.overlayCtx.fillText(text, width - 5, rectY + 11);
                 }
+
+                // Draw event markers on overlay
+                if (visualizationType === 'walls') {
+                    const RIGHT_PADDING = 80;
+                    const chartWidth = width - RIGHT_PADDING;
+                    const updateCounterToX = new Map();
+                    this.history.forEach((frame, i) => {
+                        const x = chartWidth - this.history.length + i;
+                        if (x >= 0) {
+                            updateCounterToX.set(frame.updateCounter, x);
+                        }
+                    });
+
+                    eatenWallEvents.forEach(event => {
+                        const x = updateCounterToX.get(event.updateCounter);
+                        if (x === undefined || x < 0 || x > chartWidth) return;
+                        
+                        const y = Math.floor(((max - event.price) / range) * height);
+                        if (y >= 0 && y < height) {
+                            this.overlayCtx.fillStyle = '#FFD700';
+                            this.overlayCtx.beginPath();
+                            this.overlayCtx.arc(x + 0.5, y, 3, 0, 2 * Math.PI);
+                            this.overlayCtx.fill();
+                            this.overlayCtx.font = '10px monospace';
+                            this.overlayCtx.textAlign = 'right';
+                            this.overlayCtx.textBaseline = 'middle';
+                            this.overlayCtx.fillStyle = '#FFFFFF';
+                            this.overlayCtx.fillText(`${(event.tradedPercentage * 100).toFixed(0)}%`, x - 5, y);
+                        }
+                    });
+                    
+                    bounceEvents.forEach(event => {
+                        const x = updateCounterToX.get(event.updateCounter);
+                        if (x === undefined || x < 0 || x > chartWidth) return;
+                        
+                        const y = Math.floor(((max - event.price) / range) * height);
+                        if (y >= 0 && y < height) {
+                            this.overlayCtx.beginPath();
+                            if (event.side === 'bid') {
+                                this.overlayCtx.fillStyle = '#22c55e';
+                                this.overlayCtx.moveTo(x + 0.5, y + 5); this.overlayCtx.lineTo(x + 5.5, y - 2); this.overlayCtx.lineTo(x - 4.5, y - 2);
+                            } else {
+                                this.overlayCtx.fillStyle = '#ef4444';
+                                this.overlayCtx.moveTo(x + 0.5, y - 5); this.overlayCtx.lineTo(x + 5.5, y + 2); this.overlayCtx.lineTo(x - 4.5, y + 2);
+                            }
+                            this.overlayCtx.closePath();
+                            this.overlayCtx.fill();
+                        }
+                    });
+                }
             }
         }
 
@@ -924,6 +1022,7 @@
                 },
                 connectingText: document.getElementById('connecting-text'),
                 visualizerContainer: document.getElementById('visualizer-container'),
+                fpsDisplay: document.getElementById('fps-display'),
                 infoBtn: document.getElementById('info-button'),
                 infoModal: document.getElementById('info-modal'),
                 closeModalBtn: document.getElementById('close-modal-button'),
@@ -935,6 +1034,9 @@
                 selectedSymbol: '',
                 visualizationType: 'walls',
             };
+            
+            let lastFpsTime = performance.now();
+            let frameCount = 0;
 
             const visualizer = new OrderBookVisualizer('canvas-parent');
             const orderBookManager = createOrderBookManager();
@@ -953,11 +1055,28 @@
                 dom.disconnectBtn.classList.toggle('hidden', !isConnectingOrConnected);
                 dom.visualizerContainer.classList.toggle('hidden', managerState.status !== 'connected');
 
+                if (managerState.status !== 'connected') {
+                    dom.fpsDisplay.textContent = 'FPS: --';
+                    frameCount = 0;
+                    lastFpsTime = performance.now();
+                }
+
                 if (managerState.status === 'connecting') {
                     dom.connectingText.textContent = `Connecting to ${appState.selectedSymbol} stream and building order book...`;
                 }
 
                 if (managerState.status === 'connected') {
+                    frameCount++;
+                    const now = performance.now();
+                    const delta = now - lastFpsTime;
+
+                    if (delta >= 1000) { // Update every second
+                        const fps = Math.round((frameCount * 1000) / delta);
+                        dom.fpsDisplay.textContent = `FPS: ${fps}`;
+                        lastFpsTime = now;
+                        frameCount = 0;
+                    }
+
                     dom.priceDisplay.textContent = managerState.currentPrice.toFixed(4);
                     dom.symbolDisplay.textContent = appState.selectedSymbol;
                     visualizer.render({ ...managerState, visualizationType: appState.visualizationType });
@@ -1052,6 +1171,8 @@
                     });
                     btn.classList.add('bg-cyan-600', 'text-white');
                     btn.classList.remove('text-gray-300', 'hover:bg-gray-600');
+                    visualizer.needsFullRedraw = true; // Force full redraw on type change
+                    visualizer.redraw();
                 });
             });
             
