@@ -20,10 +20,6 @@
                             </div>
                         </div>
                     </div>
-                    <select id="frequency-select" class="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50" aria-label="Update Frequency">
-                        <option value="100ms" selected>100ms (High Freq)</option>
-                        <option value="1000ms">1000ms (Low Freq)</option>
-                    </select>
                     <button id="connect-button" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-md font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:bg-gray-600">
                         Connect
                     </button>
@@ -1011,7 +1007,6 @@
                 dropdownList: document.getElementById('symbol-dropdown-list'),
                 connectBtn: document.getElementById('connect-button'),
                 disconnectBtn: document.getElementById('disconnect-button'),
-                frequencySelect: document.getElementById('frequency-select'),
                 priceDisplay: document.getElementById('price-display'),
                 symbolDisplay: document.getElementById('symbol-display'),
                 vizTypeBtns: document.querySelectorAll('.viz-type-btn'),
@@ -1050,7 +1045,6 @@
                 
                 const isConnectingOrConnected = managerState.status === 'connecting' || managerState.status === 'connected';
                 dom.searchInput.disabled = isConnectingOrConnected;
-                dom.frequencySelect.disabled = isConnectingOrConnected;
                 dom.connectBtn.classList.toggle('hidden', isConnectingOrConnected);
                 dom.disconnectBtn.classList.toggle('hidden', !isConnectingOrConnected);
                 dom.visualizerContainer.classList.toggle('hidden', managerState.status !== 'connected');
@@ -1153,7 +1147,7 @@
             dom.connectBtn.addEventListener('click', () => {
                 if (appState.selectedSymbol) {
                     const tickSize = appState.tickSizes.get(appState.selectedSymbol) || 0.0001;
-                    const frequency = dom.frequencySelect.value;
+                    const frequency = '100ms';
                     orderBookManager.connect(appState.selectedSymbol, appState.visualizationType, tickSize, frequency);
                 }
             });
