@@ -729,7 +729,7 @@
                     
                     updateCounterToX.set(frame.updateCounter, x);
 
-                    const { orderBook, currentPrice } = frame;
+                    const { orderBook } = frame;
                     const allVolumes = [...orderBook.bids.values(), ...orderBook.asks.values()].map(parseFloat);
                     if (allVolumes.length === 0) return;
 
@@ -764,16 +764,40 @@
                             this.ctx.fillRect(x, y, 1, 1);
                         }
                     });
+                });
+                
+                // Draw price line
+                this.ctx.strokeStyle = 'rgb(255, 255, 255)';
+                this.ctx.lineWidth = 1;
+                this.ctx.beginPath();
+                let pathStarted = false;
+
+                this.history.forEach((frame, i) => {
+                    const { currentPrice } = frame;
+                    const x = chartWidth - this.history.length + i;
+                    if (x < 0) return;
 
                     if (currentPrice >= displayMinPrice && currentPrice <= displayMaxPrice) {
-                        const priceY = Math.floor(((displayMaxPrice - currentPrice) / priceRange) * height);
-                        if (priceY >= 0 && priceY < height) {
-                            this.ctx.fillStyle = 'rgb(255, 255, 255)';
-                            this.ctx.fillRect(x, priceY, 1, 1);
+                        const priceY = ((displayMaxPrice - currentPrice) / priceRange) * height;
+                        if (!pathStarted) {
+                            this.ctx.moveTo(x + 0.5, priceY);
+                            pathStarted = true;
+                        } else {
+                            this.ctx.lineTo(x + 0.5, priceY);
+                        }
+                    } else {
+                        if (pathStarted) {
+                            this.ctx.stroke();
+                            this.ctx.beginPath();
+                            pathStarted = false;
                         }
                     }
                 });
                 
+                if (pathStarted) {
+                    this.ctx.stroke();
+                }
+
                 if (visualizationType === 'walls') {
                     eatenWallEvents.forEach(event => {
                         const x = updateCounterToX.get(event.updateCounter);
