@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Binance Order Book Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* To prevent layout shift when scrollbar appears */
+        html {
+            overflow-y: scroll;
+        }
+        #charts-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr); /* Display 3 charts per row */
+            gap: 1rem;
+            /* Define a fixed height for grid rows. This breaks the resize feedback loop
+               that was causing charts to grow, by making the container size independent
+               of the content size. */
+            grid-auto-rows: 400px;
+        }
+        .chart-cell {
+            /* min-height is removed. The cell's height is now strictly controlled
+               by the parent grid's `grid-auto-rows` property. */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+    <div id="root">
+        <div class="min-h-screen bg-gray-900 text-gray-200 flex flex-col font-sans">
+            <header class="p-4 bg-gray-800 border-b border-gray-700 shadow-lg flex flex-wrap items-center justify-between gap-4">
+                <h1 class="text-2xl font-bold text-cyan-400">Multi-Pair Wall Tracker</h1>
+                <div class="flex items-center gap-3">
+                    <button id="connect-button" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-md font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:bg-gray-600 disabled:cursor-not-allowed">
+                        Connect
+                    </button>
+                    <button id="disconnect-button" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-md font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 hidden">
+                        Disconnect
+                    </button>
+                     <button id="status-button" class="p-2 bg-gray-700 hover:bg-gray-600 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                        </svg>
+                    </button>
+                    <button id="info-button" class="p-2 bg-gray-700 hover:bg-gray-600 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <main id="main-content" class="flex-grow p-4">
+                <div id="status-disconnected" class="text-center h-full flex flex-col items-center justify-center">
+                    <h2 class="text-3xl font-light">Welcome</h2>
+                    <p class="text-gray-400 mt-2 max-w-lg">Press 'Connect' to begin visualizing order books for all USDC-quoted spot pairs that also have a perpetual contract on Binance Futures.</p>
+                </div>
+                <div id="status-connecting" class="h-full flex flex-col items-center justify-center gap-4 hidden">
+                    <div id="spinner">
+                        <svg class="animate-spin h-10 w-10 text-cyan-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </div>
+                    <p id="connecting-text" class="text-lg text-gray-400">Fetching symbol list...</p>
+                </div>
+                <div id="status-error" class="text-center h-full flex flex-col items-center justify-center text-red-400 hidden">
+                    <h2 class="text-2xl">Connection Error</h2>
+                    <p>Could not connect to the WebSocket stream. Please try again.</p>
+                </div>
+                <div id="charts-grid-container" class="w-full h-full hidden">
+                    <div class="flex justify-end items-center mb-2 px-2">
+                         <div class="flex items-center gap-4 text-gray-400 text-sm font-mono">
+                            <span>Use mouse wheel to zoom, click and drag to pan.</span>
+                        </div>
+                    </div>
+                    <div id="charts-grid" class="w-full h-full">
+                        <!-- Chart cells will be injected here by JS -->
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div id="info-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 hidden z-50">
+        <div class="bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 border border-gray-700 relative">
+            <button id="close-modal-button" class="absolute top-4 right-4 text-gray-400 hover:text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+            <h2 class="text-2xl font-bold text-cyan-400 mb-4">About the Multi-Pair Wall Tracker</h2>
+            <div class="space-y-4 text-gray-300">
+                <p>This application provides a real-time, high-frequency visualization of the Binance spot market order book for multiple trading pairs simultaneously. It connects to Binance's combined WebSocket streams to render a pixel-by-pixel history of order book depth and market activity.</p>
+                
+                <div>
+                    <h3 class="text-xl font-semibold text-cyan-500 mb-2">Symbol Selection</h3>
+                    <p>On connection, the app automatically finds all USDC-quoted spot pairs that also have a corresponding perpetual futures contract, focusing on the most liquid and relevant markets.</p>
+                </div>
+
+                <div>
+                    <h3 class="text-xl font-semibold text-cyan-500 mb-2">Visualization Method</h3>
+                    <p>Each chart filters its order book heatmap in real-time to show only statistically significant large orders ("walls"). This allows you to focus on key levels of support and resistance and track important market events across many pairs at once.</p>
+                </div>
+
+                <div>
+                    <h3 class="text-xl font-semibold text-cyan-500 mb-2">Event Markers</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="flex items-start gap-3">
+                            <div class="w-8 h-8 flex-shrink-0 flex items-center justify-center">
+                                <span class="text-yellow-300 text-lg font-bold">● 85%</span>
+                            </div>
+                            <div>
+                                <h4 class="font-semibold text-white">Eaten Wall</h4>
+                                <p class="text-sm">Indicates a large order wall was consumed by market trades rather than being canceled ("spoofed"). The percentage shows how much of the wall's volume was traded through.</p>
+                            </div>
+                        </div>
+                         <div class="flex items-start gap-3">
+                            <div class="w-8 h-8 flex-shrink-0 flex items-center justify-center">
+                                <span class="text-green-500 text-2xl font-bold">▲</span>
+                            </div>
+                            <div>
+                                <h4 class="font-semibold text-white">Support Bounce</h4>
+                                <p class="text-sm">Indicates the price approached a large buy wall (support) and then reversed, suggesting the wall held the price up.</p>
+                            </div>
+                        </div>
+                         <div class="flex items-start gap-3">
+                            <div class="w-8 h-8 flex-shrink-0 flex items-center justify-center">
+                                <span class="text-red-500 text-2xl font-bold">▼</span>
+                            </div>
+                            <div>
+                                <h4 class="font-semibold text-white">Resistance Bounce</h4>
+                                <p class="text-sm">Indicates the price approached a large sell wall (resistance) and then reversed, suggesting the wall pushed the price down.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                 <div>
+                    <h3 class="text-xl font-semibold text-cyan-500 mb-2">Controls</h3>
+                    <ul class="list-disc list-inside space-y-1">
+                        <li><strong class="font-semibold text-white">Zoom:</strong> Use the mouse scroll wheel over a chart.</li>
+                        <li><strong class="font-semibold text-white">Pan:</strong> Click and drag a chart vertically.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="status-modal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 hidden z-50">
+        <div class="bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 border border-gray-700 relative flex flex-col">
+            <button id="close-status-modal-button" class="absolute top-4 right-4 text-gray-400 hover:text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+            <h2 class="text-2xl font-bold text-cyan-400 mb-4">Connection Status</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left text-gray-400">
+                    <thead class="text-xs text-gray-300 uppercase bg-gray-700">
+                        <tr>
+                            <th scope="col" class="px-6 py-3">Symbol</th>
+                            <th scope="col" class="px-6 py-3">Sync Status</th>
+                            <th scope="col" class="px-6 py-3">Stream Status</th>
+                            <th scope="col" class="px-6 py-3">Book Updates</th>
+                            <th scope="col" class="px-6 py-3">Trade Updates</th>
+                            <th scope="col" class="px-6 py-3">Errors</th>
+                        </tr>
+                    </thead>
+                    <tbody id="status-table-body">
+                        <!-- Rows will be injected here by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+
+    <script type="module">
+        // --- DATA MANAGER ---
+        function createOrderBookManager() {
+            const WALL_THRESHOLD_MULTIPLIER = 10;
+            const EATEN_WALL_TRADE_PERCENTAGE = 0.8;
+            const BOUNCE_PROXIMITY_TICKS = 5;
+            const BOUNCE_REJECTION_TICKS = 7;
+
+            let state = {
+                status: 'disconnected', // 'connecting', 'connected', 'error'
+                symbols: new Map(), // Map<string, SymbolState>
+            };
+
+            let ws = null;
+            let onUpdateCallback = () => {};
+            let tickSizes = new Map();
+
+            const setState = (newState) => {
+                state = { ...state, ...newState };
+                onUpdateCallback(state);
+            };
+
+            const createInitialSymbolState = () => ({
+                status: 'pending', // 'pending', 'syncing', 'synced', 'error'
+                orderBook: null,
+                currentPrice: 0,
+                updateCounter: 0,
+                eatenWallEvents: [],
+                bounceEvents: [],
+                initialViewParams: null,
+                lastUpdateId: 0,
+                activeWalls: new Map(),
+                eventBuffer: [],
+                isProcessingBuffer: true,
+                bookUpdatesReceived: 0,
+                tradeUpdatesReceived: 0,
+                error: null,
+            });
+
+            const getSymbolFromStream = (streamName, type) => {
+                return streamName.split(`@${type}`)[0].toUpperCase();
+            };
+
+            const calculateInitialRange = async (symbol) => {
+                try {
+                    const klinesResponse = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=1m&limit=120`);
+                    if (!klinesResponse.ok) throw new Error('Failed to fetch klines');
+                    const klines = await klinesResponse.json();
+                    if (klines.length === 0) return { volatility: 0, centerPrice: 0 };
+                    
+                    let highestHigh = 0; let lowestLow = Infinity;
+                    klines.forEach(kline => {
+                        const high = parseFloat(kline[2]); const low = parseFloat(kline[3]);
+                        if (high > highestHigh) highestHigh = high;
+                        if (low < lowestLow) lowestLow = low;
+                    });
+                    const volatility = highestHigh - lowestLow;
+                    
+                    const priceResponse = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol.toUpperCase()}`);
+                    if (!priceResponse.ok) throw new Error('Failed to fetch ticker price');
+                    const priceData = await priceResponse.json();
+                    const centerPrice = parseFloat(priceData.price);
+
+                    return { volatility, centerPrice };
+                } catch (error) {
+                    console.error(`Could not calculate initial range for ${symbol}:`, error);
+                    return { volatility: 0, centerPrice: 0 };
+                }
+            };
+            
+            const processUpdates = (side, updates) => {
+              for (const [price, quantity] of updates) {
+                if (parseFloat(quantity) === 0) {
+                  side.delete(price);
+                } else {
+                  side.set(price, quantity);
+                }
+              }
+            };
+
+            const handleWallAndBounceTracking = (symbol) => {
+                const symbolState = state.symbols.get(symbol);
+                if (!symbolState || !symbolState.orderBook) return;
+
+                const { orderBook, currentPrice, updateCounter } = symbolState;
+                const allVolumes = [...Array.from(orderBook.bids.values()), ...Array.from(orderBook.asks.values())].map(parseFloat).filter(v => v > 0);
+                if (allVolumes.length === 0) return;
+
+                const avgVolume = allVolumes.reduce((sum, v) => sum + v, 0) / allVolumes.length;
+                const wallThreshold = avgVolume * WALL_THRESHOLD_MULTIPLIER;
+                
+                const currentWalls = new Set();
+                const processSide = (side, sideName) => {
+                    side.forEach((quantity, priceStr) => {
+                        const volume = parseFloat(quantity);
+                        if (volume > wallThreshold) {
+                            currentWalls.add(priceStr);
+                            if (!symbolState.activeWalls.has(priceStr)) {
+                                symbolState.activeWalls.set(priceStr, {
+                                    price: parseFloat(priceStr), side: sideName, initialVolume: volume,
+                                    lastSeenVolume: volume, cumulativeTradeVolume: 0, firstSeenUpdate: updateCounter,
+                                    proximityState: 'far',
+                                });
+                            } else {
+                                const wall = symbolState.activeWalls.get(priceStr);
+                                wall.lastSeenVolume = volume;
+                            }
+                        }
+                    });
+                };
+                processSide(orderBook.bids, 'bid');
+                processSide(orderBook.asks, 'ask');
+                
+                symbolState.activeWalls.forEach((wall, priceStr) => {
+                    if (!currentWalls.has(priceStr)) { // Wall removed
+                        const tradedPercentage = wall.initialVolume > 0 ? wall.cumulativeTradeVolume / wall.initialVolume : 0;
+                        if (tradedPercentage >= EATEN_WALL_TRADE_PERCENTAGE) {
+                            const newEvent = {
+                                id: `${wall.price}-${wall.firstSeenUpdate}`, price: wall.price,
+                                tradedPercentage: Math.min(tradedPercentage, 1), updateCounter: updateCounter,
+                            };
+                            symbolState.eatenWallEvents.push(newEvent);
+                        }
+                        symbolState.activeWalls.delete(priceStr);
+                    } else { // Wall exists, check bounce
+                        const currentTickSize = tickSizes.get(symbol) || 0;
+                        if(currentTickSize <= 0) return;
+                        const proximityThreshold = BOUNCE_PROXIMITY_TICKS * currentTickSize;
+                        const rejectionThreshold = BOUNCE_REJECTION_TICKS * currentTickSize;
+
+                        let bounceDetected = false;
+                        if (wall.side === 'ask') {
+                            const distance = wall.price - currentPrice;
+                            if (wall.proximityState === 'far' && distance > 0 && distance <= proximityThreshold) wall.proximityState = 'close';
+                            else if (wall.proximityState === 'close' && distance > rejectionThreshold) {
+                                bounceDetected = true; wall.proximityState = 'far';
+                            }
+                        } else { // bid
+                            const distance = currentPrice - wall.price;
+                            if (wall.proximityState === 'far' && distance > 0 && distance <= proximityThreshold) wall.proximityState = 'close';
+                            else if (wall.proximityState === 'close' && distance > rejectionThreshold) {
+                                bounceDetected = true; wall.proximityState = 'far';
+                            }
+                        }
+
+                        if(bounceDetected) {
+                            const newEvent = {
+                                id: `${wall.price}-${updateCounter}`, price: wall.price,
+                                side: wall.side, updateCounter: updateCounter
+                            };
+                            symbolState.bounceEvents.push(newEvent);
+                        }
+                    }
+                });
+            };
+
+            const connect = async (symbolsToConnect, tickSizesMap) => {
+                if (state.status !== 'disconnected' && state.status !== 'error') return;
+
+                manager.disconnect();
+                tickSizes = tickSizesMap;
+
+                const newSymbolStates = new Map();
+                symbolsToConnect.forEach(s => newSymbolStates.set(s, createInitialSymbolState()));
+                setState({ status: 'connecting', symbols: newSymbolStates });
+
+                const depthStreams = symbolsToConnect.map(s => `${s.toLowerCase()}@depth@100ms`);
+                const tradeStreams = symbolsToConnect.map(s => `${s.toLowerCase()}@aggTrade`);
+                const combinedStreams = [...depthStreams, ...tradeStreams].join('/');
+                
+                ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${combinedStreams}`);
+                
+                ws.onmessage = (event) => {
+                    const { stream, data } = JSON.parse(event.data);
+                    
+                    const isDepthStream = stream.includes('@depth@100ms');
+                    const streamType = isDepthStream ? 'depth@100ms' : 'aggTrade';
+                    const symbol = getSymbolFromStream(stream, streamType);
+                    const symbolState = state.symbols.get(symbol);
+                    if (!symbolState) return;
+
+                    if (isDepthStream) {
+                        symbolState.bookUpdatesReceived++;
+                        const update = data;
+                        if (symbolState.isProcessingBuffer) {
+                            symbolState.eventBuffer.push(update);
+                            return;
+                        }
+                        if (symbolState.status !== 'synced') return; // Don't process if not synced
+                        if (symbolState.lastUpdateId === 0) return; // Wait for snapshot
+                        if (update.U > symbolState.lastUpdateId + 1) return manager.disconnect(); // Sync failed
+                        
+                        if (update.u >= symbolState.lastUpdateId + 1) {
+                            if (symbolState.orderBook) {
+                                processUpdates(symbolState.orderBook.bids, update.b);
+                                processUpdates(symbolState.orderBook.asks, update.a);
+
+                                const bestBid = Math.max(...Array.from(symbolState.orderBook.bids.keys()).map(parseFloat));
+                                const bestAsk = Math.min(...Array.from(symbolState.orderBook.asks.keys()).map(parseFloat));
+                                if(isFinite(bestBid) && isFinite(bestAsk)) {
+                                    symbolState.currentPrice = (bestBid + bestAsk) / 2;
+                                }
+                                
+                                symbolState.updateCounter++;
+                                handleWallAndBounceTracking(symbol);
+                            }
+                            symbolState.lastUpdateId = update.u;
+                        }
+                    } else { // Trade stream
+                        symbolState.tradeUpdatesReceived++;
+                        const trade = data;
+                        const tradePrice = parseFloat(trade.p);
+                        const tradeQty = parseFloat(trade.q);
+                        
+                        symbolState.activeWalls.forEach(wall => {
+                            if ((wall.side === 'bid' && tradePrice <= wall.price) || (wall.side === 'ask' && tradePrice >= wall.price)) {
+                                wall.cumulativeTradeVolume += tradeQty;
+                            }
+                        });
+                    }
+                    setState({ symbols: state.symbols });
+                };
+
+                const fetchAndProcessSnapshot = async (symbol) => {
+                    const symbolState = state.symbols.get(symbol);
+                    symbolState.status = 'syncing';
+                    setState({ symbols: state.symbols });
+                    try {
+                        const [initialViewParams, response] = await Promise.all([
+                            calculateInitialRange(symbol),
+                            fetch(`https://api.binance.com/api/v3/depth?symbol=${symbol.toUpperCase()}&limit=500`)
+                        ]);
+                        if (!response.ok) throw new Error('Failed to fetch snapshot');
+
+                        symbolState.initialViewParams = initialViewParams;
+                        const snapshot = await response.json();
+                        
+                        const newOrderBook = { bids: new Map(snapshot.bids), asks: new Map(snapshot.asks) };
+                        const bestBid = Math.max(...Array.from(newOrderBook.bids.keys()).map(parseFloat));
+                        const bestAsk = Math.min(...Array.from(newOrderBook.asks.keys()).map(parseFloat));
+                        const snapshotMidPrice = (isFinite(bestBid) && isFinite(bestAsk)) ? (bestBid + bestAsk) / 2 : 0;
+                        symbolState.currentPrice = initialViewParams?.centerPrice > 0 ? initialViewParams.centerPrice : snapshotMidPrice;
+                        
+                        let firstValidUpdateIndex = symbolState.eventBuffer.findIndex(upd => upd.u > snapshot.lastUpdateId);
+
+                        if (firstValidUpdateIndex === -1) {
+                            symbolState.lastUpdateId = snapshot.lastUpdateId;
+                        } else {
+                            if (symbolState.eventBuffer[firstValidUpdateIndex].U > snapshot.lastUpdateId + 1) throw new Error('Sync gap detected');
+                            for (let i = firstValidUpdateIndex; i < symbolState.eventBuffer.length; i++) {
+                                const update = symbolState.eventBuffer[i];
+                                processUpdates(newOrderBook.bids, update.b);
+                                processUpdates(newOrderBook.asks, update.a);
+                                symbolState.lastUpdateId = update.u;
+                            }
+                        }
+                        
+                        symbolState.isProcessingBuffer = false;
+                        symbolState.eventBuffer.length = 0;
+                        symbolState.orderBook = newOrderBook;
+                        symbolState.updateCounter = 1;
+                        symbolState.status = 'synced';
+
+                    } catch (error) {
+                        console.error(`Sync failed for ${symbol}:`, error);
+                        symbolState.status = 'error';
+                        symbolState.error = error.message || 'Unknown sync error';
+                    }
+                    setState({ symbols: state.symbols });
+                };
+
+                ws.onopen = async () => {
+                    setState({ status: 'connected' });
+                    const snapshotPromises = symbolsToConnect.map(fetchAndProcessSnapshot);
+                    await Promise.allSettled(snapshotPromises);
+                };
+                ws.onerror = (err) => {
+                    console.error("WebSocket Error:", err);
+                    setState({ status: 'error' });
+                };
+                ws.onclose = () => {
+                     if (state.status === 'connected' || state.status === 'connecting') manager.disconnect();
+                };
+            };
+            
+            const manager = {
+                onUpdate(callback) { onUpdateCallback = callback; },
+                connect,
+                disconnect() {
+                    if (ws) {
+                        ws.onclose = null;
+                        ws.close();
+                    }
+                    ws = null;
+                    setState({ status: 'disconnected', symbols: new Map() });
+                }
+            };
+            return manager;
+        }
+
+        // --- VISUALIZER CLASS ---
+        class OrderBookVisualizer {
+            constructor(parent, symbol) {
+                if (!parent) throw new Error('Parent element not found');
+
+                this.symbol = symbol;
+                this.container = document.createElement('div');
+                this.container.className = 'relative w-full h-full bg-gray-900 flex flex-col border border-gray-700 rounded-lg';
+                
+                this.header = document.createElement('div');
+                this.header.className = 'flex justify-between items-center p-2 bg-gray-800 border-b border-gray-700';
+                this.symbolDisplay = document.createElement('span');
+                this.symbolDisplay.className = 'text-lg font-mono text-cyan-400';
+                this.symbolDisplay.textContent = this.symbol;
+                this.priceDisplay = document.createElement('span');
+                this.priceDisplay.className = 'text-lg font-mono text-yellow-300';
+                
+                this.fpsDisplay = document.createElement('span');
+                this.fpsDisplay.className = 'text-sm font-mono text-gray-400';
+                this.fpsDisplay.textContent = 'FPS: --';
+                
+                const rightHeaderItems = document.createElement('div');
+                rightHeaderItems.className = 'flex items-center gap-4';
+                rightHeaderItems.appendChild(this.fpsDisplay);
+                rightHeaderItems.appendChild(this.priceDisplay);
+
+                this.header.appendChild(this.symbolDisplay);
+                this.header.appendChild(rightHeaderItems);
+
+                const canvasContainer = document.createElement('div');
+                canvasContainer.className = 'relative flex-grow';
+
+                this.canvas = document.createElement('canvas');
+                this.canvas.style.width = '100%';
+                this.canvas.style.height = '100%';
+                this.canvas.style.display = 'block';
+
+                this.overlayCanvas = document.createElement('canvas');
+                this.overlayCanvas.className = 'absolute top-0 left-0 cursor-crosshair';
+                this.overlayCanvas.style.width = '100%';
+                this.overlayCanvas.style.height = '100%';
+                this.overlayCanvas.style.display = 'block';
+                
+                canvasContainer.appendChild(this.canvas);
+                canvasContainer.appendChild(this.overlayCanvas);
+                this.container.appendChild(this.header);
+                this.container.appendChild(canvasContainer);
+                parent.appendChild(this.container);
+
+                this.ctx = this.canvas.getContext('2d');
+                this.overlayCtx = this.overlayCanvas.getContext('2d');
+                
+                this.frameCount = 0;
+                this.lastFpsTime = performance.now();
+                this.dimensions = { width: 0, height: 0, dpr: 1 };
+                this.priceView = null;
+                this.history = [];
+                
+                this.isDragging = false;
+                this.dragStart = null;
+                this.mouseY = null;
+                this.latestProps = null;
+                this.needsFullRedraw = true;
+                
+                this.initEventListeners(canvasContainer);
+            }
+
+            initEventListeners(observedElement) {
+                const resizeObserver = new ResizeObserver(entries => {
+                    for (let entry of entries) {
+                        window.requestAnimationFrame(() => {
+                            const { width, height } = entry.contentRect;
+                            if (width === 0 || height === 0) return;
+                            const dpr = window.devicePixelRatio || 1;
+                            this.dimensions = { width, height, dpr };
+                            
+                            this.canvas.width = this.overlayCanvas.width = width * dpr;
+                            this.canvas.height = this.overlayCanvas.height = height * dpr;
+                            
+                            this.ctx.scale(dpr, dpr);
+                            this.overlayCtx.scale(dpr, dpr);
+
+                            const chartWidth = width - 80; // RIGHT_PADDING
+                            if (this.history.length > chartWidth) {
+                                this.history.splice(0, this.history.length - chartWidth);
+                            }
+                            this.needsFullRedraw = true;
+                            this.redraw();
+                        });
+                    }
+                });
+                resizeObserver.observe(observedElement);
+
+                this.overlayCanvas.addEventListener('mousemove', e => this.handleMouseMove(e));
+                this.overlayCanvas.addEventListener('mouseleave', () => this.handleMouseLeave());
+                this.overlayCanvas.addEventListener('wheel', e => this.handleWheel(e), { passive: false });
+                this.overlayCanvas.addEventListener('mousedown', e => this.handleMouseDown(e));
+                this.overlayCanvas.addEventListener('mouseup', e => this.handleMouseUp(e));
+                window.addEventListener('mouseup', () => {
+                    if(this.isDragging) this.handleMouseUp({ currentTarget: this.overlayCanvas });
+                });
+            }
+
+            handleWheel(event) {
+                event.preventDefault();
+                if (!this.priceView) return;
+                const { min, max } = this.priceView;
+                const { height } = this.dimensions;
+                if (height <= 0) return;
+
+                const range = max - min;
+                const zoomFactor = event.deltaY > 0 ? 1.1 : 0.9;
+                const cursorY = event.offsetY;
+                
+                const priceAtCursor = max - (cursorY / height) * range;
+                const newRange = range * zoomFactor;
+                
+                this.priceView = {
+                    min: priceAtCursor - (1 - cursorY / height) * newRange,
+                    max: priceAtCursor + (cursorY / height) * newRange
+                };
+                this.needsFullRedraw = true;
+                this.redraw();
+            }
+
+            handleMouseDown(event) {
+                if (event.button !== 0 || !this.priceView) return;
+                this.isDragging = true;
+                this.dragStart = { y: event.offsetY, view: { ...this.priceView } };
+                event.currentTarget.style.cursor = 'grabbing';
+            }
+            
+            handleMouseUp(event) {
+                this.isDragging = false; this.dragStart = null;
+                event.currentTarget.style.cursor = 'crosshair';
+            }
+
+            handleMouseMove(event) {
+                this.mouseY = event.offsetY;
+                if (this.isDragging && this.dragStart && this.priceView) {
+                    const { y: startY, view: startView } = this.dragStart;
+                    const { height } = this.dimensions;
+                    if(height <= 0) return;
+
+                    const deltaY = this.mouseY - startY;
+                    const range = startView.max - startView.min;
+                    const priceDelta = (deltaY / height) * range;
+
+                    this.priceView = { min: startView.min + priceDelta, max: startView.max + priceDelta };
+                    this.needsFullRedraw = true;
+                    this.redraw();
+                } else if (this.latestProps) {
+                    this.drawOverlay(this.latestProps);
+                }
+            }
+
+            handleMouseLeave() {
+                this.mouseY = null;
+                if (this.isDragging) this.handleMouseUp({ currentTarget: this.overlayCanvas });
+                if (this.latestProps) this.drawOverlay(this.latestProps);
+            }
+
+            volumeToColor(volume, maxLogVolume) {
+                if (volume <= 0 || maxLogVolume <= 0) return 'hsl(240, 100%, 5%)';
+                const logVolume = Math.log1p(volume);
+                const normalized = Math.min(logVolume / maxLogVolume, 1);
+                const hue = 240 * (1 - normalized);
+                return `hsl(${hue}, 100%, 50%)`;
+            }
+
+            render(props) {
+                this.latestProps = props;
+                this.priceDisplay.textContent = props.currentPrice > 0 ? props.currentPrice.toFixed(4) : '...';
+                const { orderBook, currentPrice, updateCounter, initialViewParams } = props;
+
+                if (updateCounter === 0) {
+                    this.history = []; this.priceView = null; this.needsFullRedraw = true;
+                    this.fpsDisplay.textContent = 'FPS: --';
+                    this.frameCount = 0;
+                    this.lastFpsTime = performance.now();
+                }
+
+                if (updateCounter > 0 && !this.priceView && orderBook && currentPrice > 0) {
+                    if (initialViewParams && initialViewParams.volatility > 0) {
+                        const finalRange = Math.max(initialViewParams.volatility, currentPrice * 0.002);
+                        this.priceView = { min: currentPrice - finalRange / 2, max: currentPrice + finalRange / 2 };
+                    } 
+                    else {
+                        const allPrices = [...orderBook.bids.keys(), ...orderBook.asks.keys()].map(parseFloat);
+                        if (allPrices.length > 0) {
+                            const min = Math.min(...allPrices); const max = Math.max(...allPrices);
+                            let range = max - min; if (range === 0) range = Math.max(max * 0.001, 0.0001);
+                            this.priceView = { min: min - range * 0.2, max: max + range * 0.2 };
+                        } 
+                        else {
+                            const defaultRange = currentPrice * 0.002;
+                            this.priceView = { min: currentPrice - defaultRange / 2, max: currentPrice + defaultRange / 2 };
+                        }
+                    }
+                    this.needsFullRedraw = true;
+                }
+
+                const lastUpdateInHistory = this.history.length > 0 ? this.history[this.history.length - 1].updateCounter : -1;
+                const hasNewData = orderBook && updateCounter > lastUpdateInHistory;
+                
+                if (hasNewData) {
+                    this.frameCount++;
+                    const now = performance.now();
+                    const delta = now - this.lastFpsTime;
+                    if (delta >= 1000) {
+                        const fps = Math.round((this.frameCount * 1000) / delta);
+                        this.fpsDisplay.textContent = `FPS: ${fps}`;
+                        this.lastFpsTime = now;
+                        this.frameCount = 0;
+                    }
+                    
+                    this.history.push({
+                        updateCounter, currentPrice,
+                        orderBook: { bids: new Map(orderBook.bids), asks: new Map(orderBook.asks) },
+                    });
+                    
+                    const chartWidth = this.dimensions.width - 80;
+                    if (chartWidth > 0 && this.history.length > chartWidth) this.history.shift();
+                }
+                
+                if (this.isDragging) {
+                    // While dragging, redraws are triggered by mouse events directly.
+                    return;
+                }
+                
+                // The core render logic fix: only draw if there's new data or a full redraw is needed.
+                if (this.needsFullRedraw) {
+                    this.redraw();
+                } else if (hasNewData) {
+                    this.drawLatestFrame();
+                }
+                
+                this.drawOverlay(props);
+            }
+
+            drawLatestFrame() {
+                if (!this.latestProps || !this.priceView || this.history.length < 2) return;
+                const { dpr, width, height } = this.dimensions;
+                const RIGHT_PADDING = 80;
+                const chartWidth = width - RIGHT_PADDING;
+                if (chartWidth <= 0) return;
+
+                this.ctx.globalCompositeOperation = 'copy';
+                this.ctx.drawImage(this.canvas, -dpr, 0);
+                this.ctx.globalCompositeOperation = 'source-over';
+                this.ctx.clearRect(chartWidth - 1, 0, 1, height);
+
+                const lastFrame = this.history[this.history.length - 1];
+                const prevFrame = this.history[this.history.length - 2];
+                const { orderBook, currentPrice } = lastFrame;
+                const { min: displayMinPrice, max: displayMaxPrice } = this.priceView;
+                const priceRange = displayMaxPrice - displayMinPrice;
+                if (priceRange <= 0) return;
+
+                const allVolumes = [...orderBook.bids.values(), ...orderBook.asks.values()].map(parseFloat);
+                if (allVolumes.length > 0) {
+                    const maxLogVolume = Math.log1p(Math.max(...allVolumes));
+                    if (maxLogVolume > 0) {
+                        const validVolumes = allVolumes.filter(v => v > 0);
+                        const wallThreshold = validVolumes.length > 0 ? (validVolumes.reduce((s, v) => s + v, 0) / validVolumes.length) * 10 : 0;
+                        
+                        const pixelVolumes = new Map();
+                        const processSide = (side) => {
+                            side.forEach((quantity, priceStr) => {
+                                const y = Math.floor(((displayMaxPrice - parseFloat(priceStr)) / priceRange) * height);
+                                if (y >= 0 && y < height) pixelVolumes.set(y, (pixelVolumes.get(y) || 0) + parseFloat(quantity));
+                            });
+                        };
+                        processSide(orderBook.bids); processSide(orderBook.asks);
+                        
+                        pixelVolumes.forEach((volume, y) => {
+                            if (volume >= wallThreshold) {
+                                this.ctx.fillStyle = this.volumeToColor(volume, maxLogVolume);
+                                this.ctx.fillRect(chartWidth - 1, y, 1, 1);
+                            }
+                        });
+                    }
+                }
+                
+                this.ctx.strokeStyle = 'rgb(255, 255, 255)'; this.ctx.lineWidth = 1;
+                const prevY = ((displayMaxPrice - prevFrame.currentPrice) / priceRange) * height;
+                const currY = ((displayMaxPrice - currentPrice) / priceRange) * height;
+                if (prevFrame.currentPrice >= displayMinPrice && prevFrame.currentPrice <= displayMaxPrice && currentPrice >= displayMinPrice && currentPrice <= displayMaxPrice) {
+                    this.ctx.beginPath(); this.ctx.moveTo(chartWidth - 1.5, prevY); this.ctx.lineTo(chartWidth - 0.5, currY); this.ctx.stroke();
+                }
+            }
+            
+            redraw() {
+                if (!this.latestProps || !this.priceView || !this.canvas) {
+                    if (this.overlayCtx && this.dimensions.width > 0) this.overlayCtx.clearRect(0, 0, this.dimensions.width, this.dimensions.height);
+                    return;
+                }
+                this.needsFullRedraw = false;
+                const RIGHT_PADDING = 80;
+                const { width, height } = this.dimensions;
+                const chartWidth = width - RIGHT_PADDING;
+                if (width <= 0 || height <= 0 || chartWidth <= 0) return;
+
+                this.ctx.clearRect(0, 0, width, height);
+                const { min: displayMinPrice, max: displayMaxPrice } = this.priceView;
+                const priceRange = displayMaxPrice - displayMinPrice;
+                if (priceRange <= 0) return;
+
+                this.history.forEach((frame, i) => {
+                    const x = chartWidth - this.history.length + i;
+                    if (x < 0) return;
+                    
+                    const { orderBook } = frame;
+                    const allVolumes = [...orderBook.bids.values(), ...orderBook.asks.values()].map(parseFloat);
+                    if (allVolumes.length === 0) return;
+
+                    const maxLogVolume = Math.log1p(Math.max(...allVolumes));
+                    if (maxLogVolume <= 0) return;
+                    
+                    const validVolumes = allVolumes.filter(v => v > 0);
+                    const wallThreshold = validVolumes.length > 0 ? (validVolumes.reduce((s, v) => s + v, 0) / validVolumes.length) * 10 : 0;
+                    
+                    const pixelVolumes = new Map();
+                    const processSide = (side) => {
+                        side.forEach((quantity, priceStr) => {
+                            const y = Math.floor(((displayMaxPrice - parseFloat(priceStr)) / priceRange) * height);
+                            if (y >= 0 && y < height) pixelVolumes.set(y, (pixelVolumes.get(y) || 0) + parseFloat(quantity));
+                        });
+                    };
+                    processSide(orderBook.bids); processSide(orderBook.asks);
+                    
+                    pixelVolumes.forEach((volume, y) => {
+                        if (volume >= wallThreshold) {
+                            this.ctx.fillStyle = this.volumeToColor(volume, maxLogVolume);
+                            this.ctx.fillRect(x, y, 1, 1);
+                        }
+                    });
+                });
+                
+                this.ctx.strokeStyle = 'rgb(255, 255, 255)'; this.ctx.lineWidth = 1; this.ctx.beginPath();
+                let pathStarted = false;
+                this.history.forEach((frame, i) => {
+                    const x = chartWidth - this.history.length + i;
+                    if (x < 0) return;
+                    if (frame.currentPrice >= displayMinPrice && frame.currentPrice <= displayMaxPrice) {
+                        const priceY = ((displayMaxPrice - frame.currentPrice) / priceRange) * height;
+                        if (!pathStarted) { this.ctx.moveTo(x + 0.5, priceY); pathStarted = true; } 
+                        else { this.ctx.lineTo(x + 0.5, priceY); }
+                    } else {
+                        if (pathStarted) { this.ctx.stroke(); this.ctx.beginPath(); pathStarted = false; }
+                    }
+                });
+                if (pathStarted) this.ctx.stroke();
+            }
+
+            drawOverlay(props) {
+                if (!props) return;
+                const { currentPrice, eatenWallEvents, bounceEvents } = props;
+                const { width, height } = this.dimensions;
+                
+                this.overlayCtx.clearRect(0, 0, width, height);
+                if(width <= 0 || height <= 0 || !this.priceView) return;
+                
+                const { min, max } = this.priceView;
+                const range = max - min;
+                if (range <= 0) return;
+                
+                this.overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.7)'; this.overlayCtx.font = '12px monospace';
+                this.overlayCtx.textAlign = 'right'; this.overlayCtx.textBaseline = 'top';
+                this.overlayCtx.fillText(max.toFixed(4), width - 5, 5);
+                this.overlayCtx.textBaseline = 'bottom';
+                this.overlayCtx.fillText(min.toFixed(4), width - 5, height - 5);
+                
+                if (currentPrice >= min && currentPrice <= max) {
+                    const priceY = ((max - currentPrice) / range) * height;
+                    this.overlayCtx.setLineDash([4, 2]); this.overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                    this.overlayCtx.lineWidth = 1; this.overlayCtx.beginPath();
+                    this.overlayCtx.moveTo(0, priceY); this.overlayCtx.lineTo(width, priceY); this.overlayCtx.stroke();
+                    
+                    const text = currentPrice.toFixed(4); const textMetrics = this.overlayCtx.measureText(text);
+                    const rectX = width - textMetrics.width - 8;
+                    const rectY = Math.max(0, Math.min(height - 28, priceY - 14));
+                    this.overlayCtx.fillStyle = 'rgba(120, 120, 120, 0.7)';
+                    this.overlayCtx.fillRect(rectX, rectY, textMetrics.width + 8, 20);
+                    this.overlayCtx.fillStyle = '#FFFFFF'; this.overlayCtx.textBaseline = 'middle';
+                    this.overlayCtx.fillText(text, width - 4, rectY + 10);
+                }
+                
+                if (this.mouseY !== null) {
+                    this.overlayCtx.setLineDash([]); this.overlayCtx.strokeStyle = 'rgba(255, 255, 0, 0.6)';
+                    this.overlayCtx.beginPath(); this.overlayCtx.moveTo(0, this.mouseY); this.overlayCtx.lineTo(width, this.mouseY); this.overlayCtx.stroke();
+
+                    const hoverPrice = max - (this.mouseY / height) * range;
+                    const text = hoverPrice.toFixed(4); const textMetrics = this.overlayCtx.measureText(text);
+                    const rectX = width - textMetrics.width - 10;
+                    const rectY = Math.max(0, Math.min(height - 22, this.mouseY - 11));
+                    this.overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    this.overlayCtx.fillRect(rectX, rectY, textMetrics.width + 10, 22);
+                    this.overlayCtx.fillStyle = '#FFFF00'; this.overlayCtx.textBaseline = 'middle';
+                    this.overlayCtx.fillText(text, width - 5, rectY + 11);
+                }
+
+                const RIGHT_PADDING = 80; const chartWidth = width - RIGHT_PADDING;
+                const updateCounterToX = new Map();
+                this.history.forEach((frame, i) => {
+                    const x = chartWidth - this.history.length + i;
+                    if (x >= 0) updateCounterToX.set(frame.updateCounter, x);
+                });
+
+                eatenWallEvents.forEach(event => {
+                    const x = updateCounterToX.get(event.updateCounter);
+                    if (x === undefined || x < 0 || x > chartWidth) return;
+                    const y = Math.floor(((max - event.price) / range) * height);
+                    if (y >= 0 && y < height) {
+                        this.overlayCtx.fillStyle = '#FFD700'; this.overlayCtx.beginPath();
+                        this.overlayCtx.arc(x + 0.5, y, 3, 0, 2 * Math.PI); this.overlayCtx.fill();
+                        this.overlayCtx.font = '10px monospace'; this.overlayCtx.textAlign = 'right';
+                        this.overlayCtx.textBaseline = 'middle'; this.overlayCtx.fillStyle = '#FFFFFF';
+                        this.overlayCtx.fillText(`${(event.tradedPercentage * 100).toFixed(0)}%`, x - 5, y);
+                    }
+                });
+                
+                bounceEvents.forEach(event => {
+                    const x = updateCounterToX.get(event.updateCounter);
+                    if (x === undefined || x < 0 || x > chartWidth) return;
+                    const y = Math.floor(((max - event.price) / range) * height);
+                    if (y >= 0 && y < height) {
+                        this.overlayCtx.beginPath();
+                        if (event.side === 'bid') {
+                            this.overlayCtx.fillStyle = '#22c55e';
+                            this.overlayCtx.moveTo(x + 0.5, y + 5); this.overlayCtx.lineTo(x + 5.5, y - 2); this.overlayCtx.lineTo(x - 4.5, y - 2);
+                        } else {
+                            this.overlayCtx.fillStyle = '#ef4444';
+                            this.overlayCtx.moveTo(x + 0.5, y - 5); this.overlayCtx.lineTo(x + 5.5, y + 2); this.overlayCtx.lineTo(x - 4.5, y + 2);
+                        }
+                        this.overlayCtx.closePath(); this.overlayCtx.fill();
+                    }
+                });
+            }
+
+            destroy() {
+                // In a real framework, you'd properly remove observers and event listeners.
+                // For this vanilla JS app, simply removing the element from the DOM is sufficient.
+                this.container.remove();
+            }
+        }
+
+        // --- MAIN APP LOGIC ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const dom = {
+                connectBtn: document.getElementById('connect-button'),
+                disconnectBtn: document.getElementById('disconnect-button'),
+                status: {
+                    disconnected: document.getElementById('status-disconnected'),
+                    connecting: document.getElementById('status-connecting'),
+                    error: document.getElementById('status-error'),
+                },
+                connectingText: document.getElementById('connecting-text'),
+                chartsGridContainer: document.getElementById('charts-grid-container'),
+                chartsGrid: document.getElementById('charts-grid'),
+                infoBtn: document.getElementById('info-button'),
+                infoModal: document.getElementById('info-modal'),
+                closeModalBtn: document.getElementById('close-modal-button'),
+                statusBtn: document.getElementById('status-button'),
+                statusModal: document.getElementById('status-modal'),
+                closeStatusModalBtn: document.getElementById('close-status-modal-button'),
+                statusTableBody: document.getElementById('status-table-body'),
+            };
+
+            let appState = {
+                symbols: [],
+                tickSizes: new Map(),
+            };
+            
+            let visualizers = new Map();
+            const orderBookManager = createOrderBookManager();
+
+            const updateStatusModal = (managerState) => {
+                if (dom.statusModal.classList.contains('hidden')) return;
+                dom.statusTableBody.innerHTML = '';
+                const symbols = Array.from(managerState.symbols.keys()).sort();
+                for (const symbol of symbols) {
+                    const symbolState = managerState.symbols.get(symbol);
+                    if (!symbolState) continue;
+                    const row = document.createElement('tr');
+                    row.className = 'bg-gray-800 border-b border-gray-700 hover:bg-gray-600';
+                    let statusClass = '';
+                    switch (symbolState.status) {
+                        case 'synced': statusClass = 'text-green-400'; break;
+                        case 'syncing': statusClass = 'text-yellow-400'; break;
+                        case 'error': statusClass = 'text-red-400'; break;
+                        default: statusClass = 'text-gray-400';
+                    }
+                    row.innerHTML = `
+                        <td class="px-6 py-4 font-medium text-white whitespace-nowrap">${symbol}</td>
+                        <td class="px-6 py-4 ${statusClass}">${symbolState.status}</td>
+                        <td class="px-6 py-4 ${managerState.status === 'connected' ? 'text-green-400' : 'text-red-400'}">${managerState.status}</td>
+                        <td class="px-6 py-4">${symbolState.bookUpdatesReceived}</td>
+                        <td class="px-6 py-4">${symbolState.tradeUpdatesReceived}</td>
+                        <td class="px-6 py-4 text-red-400" style="max-width: 200px; overflow-wrap: break-word;">${symbolState.error || 'N/A'}</td>
+                    `;
+                    dom.statusTableBody.appendChild(row);
+                }
+            };
+
+            const updateUI = (managerState) => {
+                Object.values(dom.status).forEach(el => el.classList.add('hidden'));
+                if (dom.status[managerState.status]) {
+                    dom.status[managerState.status].classList.remove('hidden');
+                }
+                
+                const isConnectingOrConnected = managerState.status === 'connecting' || managerState.status === 'connected';
+                dom.connectBtn.classList.toggle('hidden', isConnectingOrConnected);
+                dom.disconnectBtn.classList.toggle('hidden', !isConnectingOrConnected);
+                dom.chartsGridContainer.classList.toggle('hidden', managerState.status !== 'connected');
+
+                updateStatusModal(managerState);
+
+                if (managerState.status === 'connected') {
+                    if (managerState.symbols.size > 0) {
+                        managerState.symbols.forEach((symbolState, symbol) => {
+                            const viz = visualizers.get(symbol);
+                            if (viz) {
+                                if(symbolState.status === 'synced') {
+                                    viz.render(symbolState);
+                                } else if (symbolState.status === 'error') {
+                                    // Optionally render an error state on the chart itself
+                                }
+                            }
+                        });
+                    }
+                }
+            };
+            
+            orderBookManager.onUpdate(updateUI);
+
+            const fetchAndFilterSymbols = async () => {
+                dom.connectBtn.disabled = true;
+                try {
+                    const [spotResponse, futuresResponse] = await Promise.all([
+                        fetch('https://api.binance.com/api/v3/exchangeInfo'),
+                        fetch('https://fapi.binance.com/fapi/v1/exchangeInfo')
+                    ]);
+                    if (!spotResponse.ok || !futuresResponse.ok) throw new Error('Failed to fetch exchange info');
+                    const spotData = await spotResponse.json();
+                    const futuresData = await futuresResponse.json();
+
+                    const spotUsdcSymbols = new Set(spotData.symbols
+                        .filter(s => s.quoteAsset === 'USDC' && s.status === 'TRADING' && s.isSpotTradingAllowed)
+                        .map(s => s.symbol));
+
+                    const futuresUsdcSymbols = new Set(futuresData.symbols
+                        .filter(s => s.quoteAsset === 'USDC' && s.contractType === 'PERPETUAL')
+                        .map(s => s.symbol));
+
+                    appState.symbols = [...spotUsdcSymbols].filter(s => futuresUsdcSymbols.has(s));
+                    
+                    const allSpotSymbols = [...spotData.symbols, ...futuresData.symbols];
+                    appState.symbols.forEach(symbol => {
+                        const symbolInfo = allSpotSymbols.find(s => s.symbol === symbol);
+                        const priceFilter = symbolInfo?.filters.find(f => f.filterType === 'PRICE_FILTER');
+                        if (priceFilter) {
+                            appState.tickSizes.set(symbol, parseFloat(priceFilter.tickSize));
+                        }
+                    });
+                    
+                } catch (error) {
+                    console.error("Failed to fetch symbols:", error);
+                    dom.status.error.classList.remove('hidden');
+                    dom.status.error.querySelector('p').textContent = 'Could not fetch symbol list. Please refresh.';
+                } finally {
+                    dom.connectBtn.disabled = false;
+                }
+            };
+
+            dom.connectBtn.addEventListener('click', () => {
+                if (appState.symbols.length > 0) {
+                    dom.connectingText.textContent = `Connecting to ${appState.symbols.length} streams...`;
+                    dom.status.connecting.classList.remove('hidden');
+                    dom.status.disconnected.classList.add('hidden');
+
+                    // Setup visualizers
+                    dom.chartsGrid.innerHTML = '';
+                    visualizers.clear();
+                    for(const symbol of appState.symbols) {
+                        const cell = document.createElement('div');
+                        cell.className = 'chart-cell';
+                        dom.chartsGrid.appendChild(cell);
+                        visualizers.set(symbol, new OrderBookVisualizer(cell, symbol));
+                    }
+
+                    orderBookManager.connect(appState.symbols, appState.tickSizes);
+                }
+            });
+
+            dom.disconnectBtn.addEventListener('click', () => {
+                orderBookManager.disconnect();
+                visualizers.forEach(viz => viz.destroy());
+                visualizers.clear();
+                dom.chartsGrid.innerHTML = '';
+            });
+            
+            dom.infoBtn.addEventListener('click', () => dom.infoModal.classList.remove('hidden'));
+            dom.closeModalBtn.addEventListener('click', () => dom.infoModal.classList.add('hidden'));
+            dom.infoModal.addEventListener('click', (e) => {
+                if (e.target === dom.infoModal) dom.infoModal.classList.add('hidden');
+            });
+
+            dom.statusBtn.addEventListener('click', () => dom.statusModal.classList.remove('hidden'));
+            dom.closeStatusModalBtn.addEventListener('click', () => dom.statusModal.classList.add('hidden'));
+            dom.statusModal.addEventListener('click', (e) => {
+                if (e.target === dom.statusModal) dom.statusModal.classList.add('hidden');
+            });
+
+
+            fetchAndFilterSymbols();
+        });
+    </script>
+</body>
+</html>
+```
