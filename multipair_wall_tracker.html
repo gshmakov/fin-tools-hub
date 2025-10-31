@@ -212,6 +212,11 @@
                 bookUpdatesReceived: 0,
                 tradeUpdatesReceived: 0,
                 error: null,
+                bounceTracker: {
+                    potentialBounceSide: null, // 'bid' or 'ask'
+                    proximityWallPrice: null,  // The price of the wall we are close to
+                    priceExtremum: null,       // The peak/trough of the price during the approach
+                },
             });
 
             const getSymbolFromStream = (streamName, type) => {
@@ -259,7 +264,8 @@
                 const symbolState = state.symbols.get(symbol);
                 if (!symbolState || !symbolState.orderBook) return;
 
-                const { orderBook, currentPrice, updateCounter } = symbolState;
+                // --- Part 1: Eaten Wall Logic ---
+                const { orderBook, currentPrice, updateCounter, bounceTracker } = symbolState;
                 const allVolumes = [...Array.from(orderBook.bids.values()), ...Array.from(orderBook.asks.values())].map(parseFloat).filter(v => v > 0);
                 if (allVolumes.length === 0) return;
 
@@ -269,18 +275,13 @@
                 const currentWalls = new Set();
                 const processSide = (side, sideName) => {
                     side.forEach((quantity, priceStr) => {
-                        const volume = parseFloat(quantity);
-                        if (volume > wallThreshold) {
+                        if (parseFloat(quantity) > wallThreshold) {
                             currentWalls.add(priceStr);
                             if (!symbolState.activeWalls.has(priceStr)) {
                                 symbolState.activeWalls.set(priceStr, {
-                                    price: parseFloat(priceStr), side: sideName, initialVolume: volume,
-                                    lastSeenVolume: volume, cumulativeTradeVolume: 0, firstSeenUpdate: updateCounter,
-                                    proximityState: 'far',
+                                    price: parseFloat(priceStr), side: sideName, initialVolume: parseFloat(quantity),
+                                    cumulativeTradeVolume: 0, firstSeenUpdate: updateCounter,
                                 });
-                            } else {
-                                const wall = symbolState.activeWalls.get(priceStr);
-                                wall.lastSeenVolume = volume;
                             }
                         }
                     });
@@ -299,36 +300,108 @@
                             symbolState.eatenWallEvents.push(newEvent);
                         }
                         symbolState.activeWalls.delete(priceStr);
-                    } else { // Wall exists, check bounce
-                        const currentTickSize = tickSizes.get(symbol) || 0;
-                        if(currentTickSize <= 0) return;
-                        const proximityThreshold = BOUNCE_PROXIMITY_TICKS * currentTickSize;
-                        const rejectionThreshold = BOUNCE_REJECTION_TICKS * currentTickSize;
+                    }
+                });
 
-                        let bounceDetected = false;
-                        if (wall.side === 'ask') {
-                            const distance = wall.price - currentPrice;
-                            if (wall.proximityState === 'far' && distance > 0 && distance <= proximityThreshold) wall.proximityState = 'close';
-                            else if (wall.proximityState === 'close' && distance > rejectionThreshold) {
-                                bounceDetected = true; wall.proximityState = 'far';
-                            }
-                        } else { // bid
-                            const distance = currentPrice - wall.price;
-                            if (wall.proximityState === 'far' && distance > 0 && distance <= proximityThreshold) wall.proximityState = 'close';
-                            else if (wall.proximityState === 'close' && distance > rejectionThreshold) {
-                                bounceDetected = true; wall.proximityState = 'far';
-                            }
-                        }
+                // --- Part 2: New Bounce Logic ---
+                const currentTickSize = tickSizes.get(symbol) || 0;
+                if (currentTickSize <= 0) return;
+                const proximityThreshold = BOUNCE_PROXIMITY_TICKS * currentTickSize;
+                const rejectionThreshold = BOUNCE_REJECTION_TICKS * currentTickSize;
 
-                        if(bounceDetected) {
-                            const newEvent = {
-                                id: `${wall.price}-${updateCounter}`, price: wall.price,
-                                side: wall.side, updateCounter: updateCounter
-                            };
-                            symbolState.bounceEvents.push(newEvent);
+                // Find innermost walls
+                let innermostAskWall = null;
+                orderBook.asks.forEach((quantity, priceStr) => {
+                    if (parseFloat(quantity) > wallThreshold) {
+                        const price = parseFloat(priceStr);
+                        if (!innermostAskWall || price < innermostAskWall.price) {
+                            innermostAskWall = { price, quantity };
                         }
                     }
                 });
+
+                let innermostBidWall = null;
+                orderBook.bids.forEach((quantity, priceStr) => {
+                    if (parseFloat(quantity) > wallThreshold) {
+                        const price = parseFloat(priceStr);
+                        if (!innermostBidWall || price > innermostBidWall.price) {
+                            innermostBidWall = { price, quantity };
+                        }
+                    }
+                });
+                
+                const resetBounceTracker = () => {
+                    bounceTracker.potentialBounceSide = null;
+                    bounceTracker.proximityWallPrice = null;
+                    bounceTracker.priceExtremum = null;
+                };
+
+                // State machine for bounce tracking
+                if (bounceTracker.potentialBounceSide === 'ask') {
+                    // We are currently tracking a potential resistance bounce
+                    if (!innermostAskWall || innermostAskWall.price !== bounceTracker.proximityWallPrice) {
+                        // The wall we were watching disappeared or is no longer the innermost, so reset.
+                        resetBounceTracker();
+                    } else {
+                        // Update the peak price reached during this approach
+                        bounceTracker.priceExtremum = Math.max(bounceTracker.priceExtremum, currentPrice);
+                        // Check if price has been rejected from the peak
+                        const rejectionDistance = bounceTracker.priceExtremum - currentPrice;
+                        if (rejectionDistance > rejectionThreshold) {
+                            // Bounce confirmed!
+                            symbolState.bounceEvents.push({
+                                id: `${bounceTracker.priceExtremum}-${updateCounter}`,
+                                price: bounceTracker.priceExtremum, // Use the actual turning point
+                                side: 'ask',
+                                updateCounter: updateCounter
+                            });
+                            resetBounceTracker();
+                        }
+                    }
+                } else if (bounceTracker.potentialBounceSide === 'bid') {
+                    // We are currently tracking a potential support bounce
+                    if (!innermostBidWall || innermostBidWall.price !== bounceTracker.proximityWallPrice) {
+                        // The wall we were watching disappeared or is no longer the innermost, so reset.
+                        resetBounceTracker();
+                    } else {
+                        // Update the lowest price reached during this approach
+                        bounceTracker.priceExtremum = Math.min(bounceTracker.priceExtremum, currentPrice);
+                        // Check if price has bounced off the low point
+                        const rejectionDistance = currentPrice - bounceTracker.priceExtremum;
+                        if (rejectionDistance > rejectionThreshold) {
+                            // Bounce confirmed!
+                            symbolState.bounceEvents.push({
+                                id: `${bounceTracker.priceExtremum}-${updateCounter}`,
+                                price: bounceTracker.priceExtremum, // Use the actual turning point
+                                side: 'bid',
+                                updateCounter: updateCounter
+                            });
+                            resetBounceTracker();
+                        }
+                    }
+                }
+
+                // If we are not currently tracking a bounce, check if we should start
+                if (bounceTracker.potentialBounceSide === null) {
+                    if (innermostAskWall) {
+                        const distance = innermostAskWall.price - currentPrice;
+                        if (distance > 0 && distance <= proximityThreshold) {
+                            // Price is close to the innermost ask wall, start tracking
+                            bounceTracker.potentialBounceSide = 'ask';
+                            bounceTracker.proximityWallPrice = innermostAskWall.price;
+                            bounceTracker.priceExtremum = currentPrice;
+                        }
+                    }
+                    if (bounceTracker.potentialBounceSide === null && innermostBidWall) { // Check again in case ask wasn't triggered
+                        const distance = currentPrice - innermostBidWall.price;
+                        if (distance > 0 && distance <= proximityThreshold) {
+                            // Price is close to the innermost bid wall, start tracking
+                            bounceTracker.potentialBounceSide = 'bid';
+                            bounceTracker.proximityWallPrice = innermostBidWall.price;
+                            bounceTracker.priceExtremum = currentPrice;
+                        }
+                    }
+                }
             };
 
             const connect = async (symbolsToConnect, tickSizesMap) => {
@@ -1088,7 +1161,6 @@
             dom.statusModal.addEventListener('click', (e) => {
                 if (e.target === dom.statusModal) dom.statusModal.classList.add('hidden');
             });
-
 
             fetchAndFilterSymbols();
         });
